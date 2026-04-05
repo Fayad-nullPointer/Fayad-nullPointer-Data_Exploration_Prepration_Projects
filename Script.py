@@ -52,18 +52,69 @@ except Exception:
     model, MODEL_OK, MODEL_CLASSES = None, False, []
 
 # ── constants ────────────────────────────────────────────────
-STAGES = sorted(df["Target"].dropna().unique().tolist())
+STAGE_ORDER = (
+    "Healthy Kidney",
+    "Mild CKD (Stage 1\u20132)",
+    "Moderate CKD (Stage 3)",
+    "Severe CKD (Stage 4)",
+    "Kidney Failure (Stage 5)",
+)
+_targets_present = set(df["Target"].dropna().unique())
+STAGES = [s for s in STAGE_ORDER if s in _targets_present] + sorted(
+    _targets_present - set(STAGE_ORDER)
+)
+
+# Keys must match `Target` labels in the CSVs exactly (e.g. en dash in "1–2").
 STAGE_COLORS = {
-    "Healthy Kidney": "#22c55e",
-    "Early CKD (Stage 1)": "#84cc16",
-    "Moderate CKD (Stage 2)": "#eab308",
-    "Advanced CKD (Stage 3)": "#f97316",
-    "Severe CKD (Stage 4)": "#ef4444",
-    "End‑Stage (Stage 5)": "#991b1b",
+    "Healthy Kidney": "#27AE60",
+    "Mild CKD (Stage 1\u20132)": "#F1C40F",
+    "Moderate CKD (Stage 3)": "#E67E22",
+    "Severe CKD (Stage 4)": "#C0392B",
+    "Kidney Failure (Stage 5)": "#641E16",
 }
 
 def stage_color(s):
     return STAGE_COLORS.get(s, "#6366f1")
+
+
+def stage_sort_key(label):
+    s = str(label)
+    return STAGE_ORDER.index(s) if s in STAGE_ORDER else len(STAGE_ORDER)
+
+
+_STAGE_X_TICKTEXT = {
+    "Healthy Kidney": "Healthy Kidney",
+    "Mild CKD (Stage 1\u20132)": "Mild CKD<br>(Stage 1\u20132)",
+    "Moderate CKD (Stage 3)": "Moderate CKD<br>(Stage 3)",
+    "Severe CKD (Stage 4)": "Severe CKD<br>(Stage 4)",
+    "Kidney Failure (Stage 5)": "Kidney Failure<br>(Stage 5)",
+}
+
+
+def stage_xaxis_ticktext(stage_label):
+    s = str(stage_label)
+    if s in _STAGE_X_TICKTEXT:
+        return _STAGE_X_TICKTEXT[s]
+    if len(s) > 18:
+        mid = len(s) // 2
+        sp = s.rfind(" ", 0, mid)
+        if sp <= 0:
+            sp = s.find(" ", mid)
+        if sp > 0:
+            return s[:sp] + "<br>" + s[sp + 1 :]
+    return s
+
+
+def apply_stage_xaxis(fig):
+    """Horizontal ticks + line breaks + automargin (avoids tilt/clipping)."""
+    fig.update_xaxes(
+        tickvals=STAGES,
+        ticktext=[stage_xaxis_ticktext(s) for s in STAGES],
+        tickangle=0,
+        automargin=True,
+        tickfont=dict(size=11),
+    )
+
 
 PALETTE = [stage_color(s) for s in STAGES]
 
@@ -192,7 +243,7 @@ app.index_string = '''<!DOCTYPE html>
 sidebar = html.Div([
     html.Div(["Nephro", html.Span("Care")], className="sidebar-brand"),
     html.Div(style={"height": "18px"}),
-    dcc.Link([html.Span("📊"), "Overview"], href="/", className="nav-item active",
+    dcc.Link([html.Span("📊"), "Overview"], href="/", className="nav-item",
              id="nav-overview"),
     dcc.Link([html.Span("🔬"), "Clinical Analysis"], href="/analysis", className="nav-item",
              id="nav-analysis"),
@@ -226,25 +277,46 @@ def page_overview():
     avg_egfr = round(df["eGFR"].mean(), 1)
     avg_cr = round(df["Serum_Creatinine"].mean(), 2)
 
-    # -- stage distribution donut
-    stage_counts = df["Target"].value_counts().reset_index()
-    stage_counts.columns = ["Stage", "Count"]
+    # -- stage distribution donut (row order + sort=False → clinical order, not by size)
+    vc = df["Target"].value_counts()
+    stage_counts = pd.DataFrame({"Stage": STAGES, "Count": [vc.get(s, 0) for s in STAGES]})
+    stage_counts = stage_counts[stage_counts["Count"] > 0]
     fig_donut = px.pie(stage_counts, names="Stage", values="Count",
                        hole=.55, color="Stage",
+                       category_orders={"Stage": STAGES},
                        color_discrete_map={s: stage_color(s) for s in STAGES},
                        template=TMPL)
-    fig_donut.update_traces(textposition="outside", textinfo="label+percent",
-                            textfont_size=12)
-    fig_donut.update_layout(showlegend=False, margin=dict(t=30, b=10, l=10, r=10),
-                            height=370)
+    fig_donut.update_traces(
+        textposition="auto",
+        textinfo="percent",
+        textfont_size=11,
+        sort=False,
+        marker=dict(line=dict(color="#fff", width=1)),
+    )
+    fig_donut.update_layout(
+        showlegend=True,
+        legend=dict(
+            orientation="v",
+            yanchor="middle",
+            y=0.5,
+            xanchor="left",
+            x=1.02,
+            font=dict(size=10),
+            itemwidth=30,
+        ),
+        margin=dict(t=24, b=32, l=20, r=200),
+        height=400,
+        uniformtext_minsize=9,
+        uniformtext_mode="hide",
+    )
 
     # -- eGFR by stage
     fig_egfr = px.box(df, x="Target", y="eGFR", color="Target",
                       color_discrete_map={s: stage_color(s) for s in STAGES},
                       template=TMPL, category_orders={"Target": STAGES})
-    fig_egfr.update_layout(showlegend=False, height=370,
-                           xaxis_title="", yaxis_title="eGFR (mL/min/1.73m²)",
-                           xaxis_tickangle=-25)
+    fig_egfr.update_layout(showlegend=False, height=400,
+                           xaxis_title="", yaxis_title="eGFR (mL/min/1.73m²)")
+    apply_stage_xaxis(fig_egfr)
 
     # -- age distribution
     fig_age = px.histogram(df, x="Age", color="Target", nbins=30, barmode="stack",
@@ -310,22 +382,25 @@ def page_analysis():
     fig_cr = px.violin(df, x="Target", y="Serum_Creatinine", color="Target", box=True,
                        color_discrete_map={s: stage_color(s) for s in STAGES},
                        template=TMPL, category_orders={"Target": STAGES})
-    fig_cr.update_layout(showlegend=False, height=380, xaxis_title="",
-                         yaxis_title="Serum Creatinine (mg/dL)", xaxis_tickangle=-25)
+    fig_cr.update_layout(showlegend=False, height=400, xaxis_title="",
+                         yaxis_title="Serum Creatinine (mg/dL)")
+    apply_stage_xaxis(fig_cr)
 
     # -- BUN
     fig_bun = px.box(df, x="Target", y="Blood_Urea_Nitrogen", color="Target",
                      color_discrete_map={s: stage_color(s) for s in STAGES},
                      template=TMPL, category_orders={"Target": STAGES})
-    fig_bun.update_layout(showlegend=False, height=380, xaxis_title="",
-                          yaxis_title="BUN (mg/dL)", xaxis_tickangle=-25)
+    fig_bun.update_layout(showlegend=False, height=400, xaxis_title="",
+                          yaxis_title="BUN (mg/dL)")
+    apply_stage_xaxis(fig_bun)
 
     # -- Pulse Pressure
     fig_pp = px.box(df, x="Target", y="Pulse_Pressure", color="Target",
                     color_discrete_map={s: stage_color(s) for s in STAGES},
                     template=TMPL, category_orders={"Target": STAGES})
-    fig_pp.update_layout(showlegend=False, height=380, xaxis_title="",
-                         yaxis_title="Pulse Pressure (mmHg)", xaxis_tickangle=-25)
+    fig_pp.update_layout(showlegend=False, height=400, xaxis_title="",
+                         yaxis_title="Pulse Pressure (mmHg)")
+    apply_stage_xaxis(fig_pp)
 
     # -- Hemoglobin
     fig_hemo = px.histogram(df, x="Hemoglobin", color="Target", barmode="overlay",
@@ -534,6 +609,48 @@ def page_data():
 # CALLBACKS
 # ════════════════════════════════════════════════════════════
 
+def _norm_path(p):
+    if not p:
+        return "/"
+    p = p.rstrip("/") or "/"
+    return p
+
+
+def _nav_item_class(active_href, href):
+    return "nav-item active" if _norm_path(active_href) == _norm_path(href) else "nav-item"
+
+
+def _sidebar_active_href(pathname):
+    """Match `render_page` so unknown routes still highlight Overview."""
+    p = _norm_path(pathname)
+    if p == "/analysis":
+        return "/analysis"
+    if p == "/predict":
+        return "/predict"
+    if p == "/data":
+        return "/data"
+    return "/"
+
+
+@app.callback(
+    [
+        Output("nav-overview", "className"),
+        Output("nav-analysis", "className"),
+        Output("nav-predict", "className"),
+        Output("nav-data", "className"),
+    ],
+    Input("url", "pathname"),
+)
+def highlight_nav(pathname):
+    a = _sidebar_active_href(pathname)
+    return (
+        _nav_item_class(a, "/"),
+        _nav_item_class(a, "/analysis"),
+        _nav_item_class(a, "/predict"),
+        _nav_item_class(a, "/data"),
+    )
+
+
 @app.callback(Output("page-content", "children"),
               Input("url", "pathname"))
 def render_page(path):
@@ -596,7 +713,10 @@ def run_prediction(n_clicks, *vals):
     ]
     if proba is not None:
         prob_items = []
-        for cls, p in sorted(zip(MODEL_CLASSES, proba), key=lambda x: -x[1]):
+        for cls, p in sorted(
+            zip(MODEL_CLASSES, proba),
+            key=lambda x: (stage_sort_key(x[0]), -x[1]),
+        ):
             prob_items.append(
                 html.Div([
                     html.Div(style={"width": f"{p*100:.0f}%", "height": "8px",
