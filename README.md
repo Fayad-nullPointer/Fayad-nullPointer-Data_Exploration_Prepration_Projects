@@ -29,7 +29,7 @@
 2. **Install dependencies**:
    Make sure you have your Python environment set up, then install the required packages:
    ```bash
-   pip install pandas numpy dash plotly xgboost scikit-learn
+   pip install -r requirements.txt
    ```
 
 3. **Run the Dashboard**:
